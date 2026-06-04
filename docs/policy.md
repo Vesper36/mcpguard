@@ -9,6 +9,14 @@ defaults:
 rules: []
 ```
 
+Generate a preset instead of starting from scratch:
+
+```bash
+mcpguard init --preset filesystem-safe
+mcpguard init --preset shell-safe --out shell.mcpguard.yaml
+mcpguard init --preset github-readonly --out github.mcpguard.yaml
+```
+
 ## Actions
 
 - `allow`: Forward the tool call to the MCP server.

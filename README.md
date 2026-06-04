@@ -4,7 +4,7 @@ Local security gateway for MCP servers and AI coding agents.
 
 ```bash
 pnpm add -g mcpguard
-mcpguard run --policy mcpguard.yaml -- npx @modelcontextprotocol/server-filesystem .
+mcpguard setup cursor filesystem --root .
 ```
 
 MCPGuard sits between an AI client and an MCP server. It proxies stdio JSON-RPC traffic, blocks risky tool calls before they reach the server, redacts secrets from responses, and writes an audit trail you can review later.
@@ -29,7 +29,9 @@ MCPGuard is built for:
 - **Secret redaction**: Masks API keys, GitHub tokens, JWTs, AWS keys, private keys, and custom patterns.
 - **Interactive approval**: Uses `/dev/tty` so MCP stdin/stdout stays protocol-clean.
 - **Audit logs**: JSONL events for decisions, responses, lifecycle, and errors.
+- **One-command setup**: Generates policy, policy tests, and MCP client config for Cursor, Claude Desktop, or generic clients.
 - **Policy generation**: Creates allow-rule drafts from real approved sessions.
+- **Doctor checks**: Verifies Node.js, policy validity, safety defaults, policy tests, and server command availability.
 - **No telemetry**: Runs locally and does not send prompts, code, or logs anywhere.
 
 ## Quickstart
@@ -37,13 +39,25 @@ MCPGuard is built for:
 Create a policy:
 
 ```bash
-mcpguard init
+mcpguard init --preset filesystem-safe
+```
+
+Or generate a complete Cursor/Claude-ready setup for the current repository:
+
+```bash
+mcpguard setup cursor filesystem --root .
 ```
 
 Run an MCP server behind MCPGuard:
 
 ```bash
 mcpguard run -- npx @modelcontextprotocol/server-filesystem .
+```
+
+Check the local setup:
+
+```bash
+mcpguard doctor --policy mcpguard.yaml --test mcpguard.tests.yaml -- npx @modelcontextprotocol/server-filesystem .
 ```
 
 Review recent decisions:
@@ -136,8 +150,12 @@ Rules are evaluated top to bottom. The first matching rule wins. If no rule matc
 
 ```bash
 mcpguard init [--out mcpguard.yaml] [--force]
-mcpguard run [--policy mcpguard.yaml] [--audit-log .mcpguard/audit.jsonl] [--non-interactive deny|allow] -- <server command>
+mcpguard init [--preset filesystem-safe|shell-safe|github-readonly]
+mcpguard setup <cursor|claude|generic> filesystem [--root .] [--force]
+mcpguard run [--policy mcpguard.yaml] [--cwd .] [--audit-log .mcpguard/audit.jsonl] [--non-interactive deny|allow] -- <server command>
 mcpguard logs [--audit-log .mcpguard/audit.jsonl] [--limit 20] [--json]
+mcpguard config generate --client cursor --name filesystem --policy mcpguard.yaml -- npx @modelcontextprotocol/server-filesystem .
+mcpguard doctor [--policy mcpguard.yaml] [--test mcpguard.tests.yaml] [--json] [-- <server command>]
 mcpguard policy generate [--audit-log .mcpguard/audit.jsonl] [--out mcpguard.generated.yaml]
 mcpguard policy validate [--policy mcpguard.yaml] [--json]
 mcpguard policy simulate [--policy mcpguard.yaml] --tool read_file --args '{"path":"README.md"}' [--json] [--fail-on-deny]

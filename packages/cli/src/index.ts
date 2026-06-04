@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_POLICY_TEXT,
@@ -21,12 +21,27 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 const DEFAULT_POLICY_PATH = "mcpguard.yaml";
 const DEFAULT_POLICY_TEST_PATH = "mcpguard.tests.yaml";
 
+type PolicyPreset =
+  | "default"
+  | "filesystem-safe"
+  | "shell-safe"
+  | "github-readonly";
+type SetupClient = "claude-desktop" | "cursor" | "generic";
+type SetupTarget = "filesystem";
+
 interface RunOptions {
   policyPath: string;
   auditLog?: string;
+  cwd?: string;
   noRedaction: boolean;
   nonInteractive?: "deny" | "allow";
   command: string[];
+}
+
+interface InitOptions {
+  path: string;
+  force: boolean;
+  preset: PolicyPreset;
 }
 
 interface LogsOptions {
@@ -88,6 +103,40 @@ interface PolicyTestResult {
   message?: string;
 }
 
+interface ConfigGenerateOptions {
+  client: "claude-desktop" | "cursor" | "generic";
+  name: string;
+  policyPath: string;
+  cwd: string;
+  out?: string;
+  command: string[];
+}
+
+interface DoctorOptions {
+  policyPath: string;
+  testFile?: string;
+  json: boolean;
+  command: string[];
+}
+
+interface DoctorCheck {
+  name: string;
+  status: "pass" | "warn" | "fail";
+  message: string;
+}
+
+interface SetupOptions {
+  client: SetupClient;
+  target: SetupTarget;
+  root: string;
+  name: string;
+  policyPath: string;
+  testsPath: string;
+  configPath: string;
+  force: boolean;
+  command: string[];
+}
+
 async function main(argv = process.argv.slice(2)): Promise<number> {
   const [command, ...rest] = argv;
 
@@ -110,8 +159,14 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
         return await runCommand(rest);
       case "logs":
         return await logsCommand(rest);
+      case "setup":
+        return await setupCommand(rest);
       case "policy":
         return await policyCommand(rest);
+      case "config":
+        return await configCommand(rest);
+      case "doctor":
+        return await doctorCommand(rest);
       default:
         throw new CliError(`Unknown command: ${command}`, 1);
     }
@@ -131,17 +186,60 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
 }
 
 async function initCommand(args: string[]): Promise<number> {
-  const force = args.includes("--force") || args.includes("-f");
-  const path = readStringOption(args, ["--out", "-o"], DEFAULT_POLICY_PATH);
+  const options = parseInitOptions(args);
 
-  if (existsSync(path) && !force) {
-    throw new CliError(`${path} already exists. Use --force to overwrite.`, 1);
+  if (existsSync(options.path) && !options.force) {
+    throw new CliError(
+      `${options.path} already exists. Use --force to overwrite.`,
+      1,
+    );
   }
 
-  await mkdir(dirname(resolve(path)), { recursive: true });
-  await writeFile(path, DEFAULT_POLICY_TEXT, "utf8");
-  console.log(`Created ${path}`);
+  await mkdir(dirname(resolve(options.path)), { recursive: true });
+  await writeFile(options.path, policyPresetText(options.preset), "utf8");
+  console.log(`Created ${options.path}`);
   return 0;
+}
+
+async function setupCommand(args: string[]): Promise<number> {
+  const options = parseSetupOptions(args);
+  const policyText = policyPresetText("filesystem-safe");
+  const testText = filesystemPolicyTestsText(options.policyPath);
+  const config = buildMcpClientConfig({
+    client: options.client,
+    name: options.name,
+    policyPath: options.policyPath,
+    cwd: options.root,
+    command: options.command,
+  });
+  const configText = `${JSON.stringify(config, null, 2)}\n`;
+
+  await writeSetupFile(options.policyPath, policyText, options.force);
+  await writeSetupFile(options.testsPath, testText, options.force);
+  await writeSetupFile(options.configPath, configText, options.force);
+
+  console.log(`Created ${options.policyPath}`);
+  console.log(`Created ${options.testsPath}`);
+  console.log(`Created ${options.configPath}`);
+  console.log("");
+  console.log("Paste this mcpServers block into your MCP client:");
+  console.log(configText.trimEnd());
+  console.log("");
+
+  const checks = await runDoctorChecks({
+    policyPath: options.policyPath,
+    testFile: options.testsPath,
+    json: false,
+    command: options.command,
+  });
+
+  for (const check of checks) {
+    console.log(
+      `${check.status.toUpperCase()} ${check.name}: ${check.message}`,
+    );
+  }
+
+  return checks.some((check) => check.status === "fail") ? 1 : 0;
 }
 
 async function runCommand(args: string[]): Promise<number> {
@@ -160,6 +258,7 @@ async function runCommand(args: string[]): Promise<number> {
     command,
     args: commandArgs,
     policy,
+    cwd: options.cwd,
   });
 }
 
@@ -314,16 +413,7 @@ async function policyTestCommand(args: string[]): Promise<number> {
         testFile.policy ?? DEFAULT_POLICY_PATH,
       );
   const policy = await loadPolicy(policyPath);
-  const results: PolicyTestResult[] = [];
-
-  for (const testCase of testFile.cases) {
-    const result = evaluatePolicyTestCase(policy, testCase);
-    results.push(result);
-
-    if (options.failFast && !result.ok) {
-      break;
-    }
-  }
+  const results = runPolicyTestSuite(policy, testFile.cases, options.failFast);
 
   const passed = results.filter((result) => result.ok).length;
   const failed = results.length - passed;
@@ -352,6 +442,54 @@ async function policyTestCommand(args: string[]): Promise<number> {
 
     console.log(
       `Policy tests: ${passed} passed, ${failed} failed (${options.file})`,
+    );
+  }
+
+  return failed === 0 ? 0 : 1;
+}
+
+async function configCommand(args: string[]): Promise<number> {
+  const [subcommand, ...rest] = args;
+  if (subcommand !== "generate") {
+    throw new CliError(
+      "Use: mcpguard config generate [options] -- <server command>",
+      1,
+    );
+  }
+
+  const options = parseConfigGenerateOptions(rest);
+  const config = buildMcpClientConfig(options);
+  const json = `${JSON.stringify(config, null, 2)}\n`;
+
+  if (options.out) {
+    await mkdir(dirname(resolve(options.out)), { recursive: true });
+    await writeFile(options.out, json, "utf8");
+    console.log(`Created ${options.out}`);
+  } else {
+    console.log(json.trimEnd());
+  }
+
+  return 0;
+}
+
+async function doctorCommand(args: string[]): Promise<number> {
+  const options = parseDoctorOptions(args);
+  const checks = await runDoctorChecks(options);
+  const failed = checks.filter((check) => check.status === "fail").length;
+
+  if (options.json) {
+    console.log(
+      JSON.stringify({
+        ok: failed === 0,
+        checks,
+      }),
+    );
+    return failed === 0 ? 0 : 1;
+  }
+
+  for (const check of checks) {
+    console.log(
+      `${check.status.toUpperCase()} ${check.name}: ${check.message}`,
     );
   }
 
@@ -410,6 +548,140 @@ export function parsePolicyTestOptions(args: string[]): PolicyTestOptions {
   };
 }
 
+export function parseConfigGenerateOptions(
+  args: string[],
+): ConfigGenerateOptions {
+  const splitIndex = args.indexOf("--");
+  if (splitIndex === -1) {
+    throw new CliError(
+      "Missing -- separator. Use: mcpguard config generate [options] -- <server command>",
+      1,
+    );
+  }
+
+  const optionArgs = args.slice(0, splitIndex);
+  const command = args.slice(splitIndex + 1);
+  const client = readStringOption(optionArgs, ["--client"], "generic");
+
+  if (
+    client !== "claude-desktop" &&
+    client !== "cursor" &&
+    client !== "generic"
+  ) {
+    throw new CliError(
+      "--client must be claude-desktop, cursor, or generic",
+      1,
+    );
+  }
+
+  if (command.length === 0) {
+    throw new CliError("Missing MCP server command after --", 1);
+  }
+
+  return {
+    client,
+    name: readStringOption(optionArgs, ["--name"], "default"),
+    policyPath: readStringOption(
+      optionArgs,
+      ["--policy", "-p"],
+      DEFAULT_POLICY_PATH,
+    ),
+    cwd: readStringOption(optionArgs, ["--cwd"], process.cwd()),
+    out: readOptionalStringOption(optionArgs, ["--out", "-o"]),
+    command,
+  };
+}
+
+export function parseDoctorOptions(args: string[]): DoctorOptions {
+  const splitIndex = args.indexOf("--");
+  const optionArgs = splitIndex === -1 ? args : args.slice(0, splitIndex);
+  const command = splitIndex === -1 ? [] : args.slice(splitIndex + 1);
+
+  return {
+    policyPath: readStringOption(
+      optionArgs,
+      ["--policy", "-p"],
+      DEFAULT_POLICY_PATH,
+    ),
+    testFile: readOptionalStringOption(optionArgs, ["--test"]),
+    json: optionArgs.includes("--json"),
+    command,
+  };
+}
+
+export function parseInitOptions(args: string[]): InitOptions {
+  const preset = readStringOption(args, ["--preset"], "default");
+
+  if (!isPolicyPreset(preset)) {
+    throw new CliError(
+      "--preset must be default, filesystem-safe, shell-safe, or github-readonly",
+      1,
+    );
+  }
+
+  return {
+    path: readStringOption(args, ["--out", "-o"], DEFAULT_POLICY_PATH),
+    force: args.includes("--force") || args.includes("-f"),
+    preset,
+  };
+}
+
+export function parseSetupOptions(args: string[]): SetupOptions {
+  const [clientInput, targetInput, ...rest] = args;
+  const client = normalizeSetupClient(clientInput);
+
+  if (!client) {
+    throw new CliError(
+      "Use: mcpguard setup <cursor|claude|generic> filesystem [--root .]",
+      1,
+    );
+  }
+
+  if (targetInput !== "filesystem") {
+    throw new CliError(
+      "Only the filesystem setup target is currently supported",
+      1,
+    );
+  }
+
+  const splitIndex = rest.indexOf("--");
+  const optionArgs = splitIndex === -1 ? rest : rest.slice(0, splitIndex);
+  const commandOverride = splitIndex === -1 ? [] : rest.slice(splitIndex + 1);
+  const root = resolve(readStringOption(optionArgs, ["--root"], "."));
+  const name = readStringOption(optionArgs, ["--name"], "filesystem");
+  const policyPath = resolvePathFromBaseFile(
+    `${root}/setup`,
+    readStringOption(optionArgs, ["--policy", "-p"], DEFAULT_POLICY_PATH),
+  );
+  const testsPath = resolvePathFromBaseFile(
+    `${root}/setup`,
+    readStringOption(optionArgs, ["--tests"], DEFAULT_POLICY_TEST_PATH),
+  );
+  const configPath = resolvePathFromBaseFile(
+    `${root}/setup`,
+    readStringOption(
+      optionArgs,
+      ["--config-out"],
+      `.mcpguard/${client}-filesystem.mcp.json`,
+    ),
+  );
+
+  return {
+    client,
+    target: "filesystem",
+    root,
+    name,
+    policyPath,
+    testsPath,
+    configPath,
+    force: optionArgs.includes("--force") || optionArgs.includes("-f"),
+    command:
+      commandOverride.length > 0
+        ? commandOverride
+        : ["npx", "@modelcontextprotocol/server-filesystem", "."],
+  };
+}
+
 export function parseRunOptions(args: string[]): RunOptions {
   const splitIndex = args.indexOf("--");
   if (splitIndex === -1) {
@@ -442,6 +714,7 @@ export function parseRunOptions(args: string[]): RunOptions {
       DEFAULT_POLICY_PATH,
     ),
     auditLog: readOptionalStringOption(optionArgs, ["--audit-log", "--log"]),
+    cwd: readOptionalStringOption(optionArgs, ["--cwd"]),
     noRedaction: optionArgs.includes("--no-redaction"),
     nonInteractive: parsedNonInteractive,
     command,
@@ -477,6 +750,380 @@ async function loadPolicy(
       ? DEFAULT_POLICY_TEXT
       : await readFile(policyPath, "utf8");
   return parsePolicy(source, policyPath);
+}
+
+function buildMcpClientConfig(options: ConfigGenerateOptions): JsonObject {
+  return {
+    mcpServers: {
+      [options.name]: {
+        command: "mcpguard",
+        args: [
+          "run",
+          "--policy",
+          resolve(options.policyPath),
+          "--cwd",
+          resolve(options.cwd),
+          "--",
+          ...options.command,
+        ],
+      },
+    },
+  };
+}
+
+async function writeSetupFile(
+  path: string,
+  content: string,
+  force: boolean,
+): Promise<void> {
+  if (existsSync(path) && !force) {
+    throw new CliError(`${path} already exists. Use --force to overwrite.`, 1);
+  }
+
+  await mkdir(dirname(resolve(path)), { recursive: true });
+  await writeFile(path, content, "utf8");
+}
+
+function policyPresetText(preset: PolicyPreset): string {
+  switch (preset) {
+    case "default":
+      return DEFAULT_POLICY_TEXT;
+    case "filesystem-safe":
+      return `version: 1
+
+defaults:
+  action: ask
+  reason: Review filesystem access before allowing it.
+
+redaction:
+  enabled: true
+  mask: "****"
+
+audit:
+  enabled: true
+  path: ".mcpguard/audit.jsonl"
+
+approval:
+  nonInteractive: deny
+  rememberByDefault: false
+
+rules:
+  - id: block-secret-files
+    description: Block common secret-bearing files.
+    match:
+      method: tools/call
+      args:
+        path:
+          deny:
+            - ".env"
+            - ".env.*"
+            - "**/.env"
+            - "**/.env.*"
+            - "**/*.pem"
+            - "**/*.key"
+            - "**/*.p12"
+            - "**/*.pfx"
+            - "**/id_rsa"
+            - "**/id_ed25519"
+            - "**/credentials"
+            - "**/secrets.*"
+    action: deny
+    reason: Secret-bearing files are blocked by default.
+
+  - id: block-heavy-and-generated-folders
+    description: Block large or generated folders that are rarely useful for agent context.
+    match:
+      method: tools/call
+      args:
+        path:
+          deny:
+            - "node_modules/**"
+            - ".git/**"
+            - "dist/**"
+            - "build/**"
+            - "coverage/**"
+            - ".next/**"
+            - ".turbo/**"
+    action: deny
+    reason: Generated and dependency folders are blocked by default.
+
+  - id: allow-project-context
+    description: Allow normal source, docs, and project metadata reads.
+    match:
+      method: tools/call
+      tool:
+        - read_file
+        - list_directory
+        - search_files
+      args:
+        path:
+          allow:
+            - "src/**"
+            - "app/**"
+            - "components/**"
+            - "packages/**"
+            - "docs/**"
+            - "examples/**"
+            - "README.md"
+            - "CONTRIBUTING.md"
+            - "SECURITY.md"
+            - "LICENSE"
+            - "package.json"
+            - "pnpm-workspace.yaml"
+            - "tsconfig*.json"
+            - "vite.config.*"
+            - "next.config.*"
+    action: allow
+    reason: Read-only project context is allowed for non-secret paths.
+`;
+    case "shell-safe":
+      return `version: 1
+
+defaults:
+  action: ask
+  reason: Review shell commands before allowing them.
+
+redaction:
+  enabled: true
+  mask: "****"
+
+audit:
+  enabled: true
+  path: ".mcpguard/audit.jsonl"
+
+approval:
+  nonInteractive: deny
+  rememberByDefault: false
+
+rules:
+  - id: block-destructive-shell
+    match:
+      method: tools/call
+      args:
+        command:
+          denyRegex:
+            - "(^|\\\\s)rm\\\\s+-rf(\\\\s|$)"
+            - "git\\\\s+reset\\\\s+--hard"
+            - "git\\\\s+clean\\\\s+-fd"
+            - "DROP\\\\s+DATABASE"
+            - "truncate\\\\s+table"
+            - "curl\\\\s+[^|]+\\\\|\\\\s*(sh|bash)"
+    action: deny
+    reason: Destructive shell commands are blocked by default.
+`;
+    case "github-readonly":
+      return `version: 1
+
+defaults:
+  action: ask
+  reason: Review GitHub MCP operations before allowing them.
+
+redaction:
+  enabled: true
+  mask: "****"
+
+audit:
+  enabled: true
+  path: ".mcpguard/audit.jsonl"
+
+approval:
+  nonInteractive: deny
+  rememberByDefault: false
+
+rules:
+  - id: block-github-mutating-tools
+    match:
+      method: tools/call
+      toolRegex: "(create|update|delete|merge|close|reopen|comment|review|approve|request|invite|add|remove)"
+    action: deny
+    reason: Mutating GitHub tools are blocked by the readonly preset.
+
+  - id: allow-github-read-tools
+    match:
+      method: tools/call
+      toolRegex: "(get|list|search|read|fetch)"
+    action: allow
+    reason: Read-only GitHub tools are allowed.
+`;
+  }
+}
+
+function filesystemPolicyTestsText(policyPath: string): string {
+  return `version: 1
+policy: ${JSON.stringify(policyPath)}
+
+cases:
+  - name: allow source read
+    tool: read_file
+    args:
+      path: src/index.ts
+    expect:
+      action: allow
+      ruleId: allow-project-context
+
+  - name: block dotenv read
+    tool: read_file
+    args:
+      path: .env
+    expect:
+      action: deny
+      ruleId: block-secret-files
+
+  - name: block private key read
+    tool: read_file
+    args:
+      path: id_ed25519
+    expect:
+      action: deny
+      ruleId: block-secret-files
+
+  - name: ask before unknown write
+    tool: write_file
+    args:
+      path: src/index.ts
+      content: hello
+    expect:
+      action: ask
+      ruleId: null
+`;
+}
+
+function isPolicyPreset(value: string): value is PolicyPreset {
+  return (
+    value === "default" ||
+    value === "filesystem-safe" ||
+    value === "shell-safe" ||
+    value === "github-readonly"
+  );
+}
+
+function normalizeSetupClient(
+  value: string | undefined,
+): SetupClient | undefined {
+  if (value === "claude") {
+    return "claude-desktop";
+  }
+
+  if (value === "claude-desktop" || value === "cursor" || value === "generic") {
+    return value;
+  }
+
+  return undefined;
+}
+
+async function runDoctorChecks(options: DoctorOptions): Promise<DoctorCheck[]> {
+  const checks: DoctorCheck[] = [];
+  const nodeMajor = Number(process.versions.node.split(".")[0]);
+
+  checks.push({
+    name: "node",
+    status: nodeMajor >= 20 ? "pass" : "fail",
+    message: `Node.js ${process.versions.node}${nodeMajor >= 20 ? "" : " is below the required 20.x"}`,
+  });
+
+  let policy: McpGuardPolicy | undefined;
+  try {
+    policy = await loadPolicy(options.policyPath);
+    checks.push({
+      name: "policy",
+      status: "pass",
+      message: `${options.policyPath} is valid with ${policy.rules.length} rule${policy.rules.length === 1 ? "" : "s"}`,
+    });
+  } catch (error) {
+    checks.push({
+      name: "policy",
+      status: "fail",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  if (policy) {
+    checks.push({
+      name: "redaction",
+      status: policy.redaction.enabled ? "pass" : "warn",
+      message: policy.redaction.enabled
+        ? "response redaction is enabled"
+        : "response redaction is disabled",
+    });
+    checks.push({
+      name: "audit",
+      status: policy.audit.enabled ? "pass" : "warn",
+      message: policy.audit.enabled
+        ? `audit log enabled at ${policy.audit.path}`
+        : "audit logging is disabled",
+    });
+    checks.push({
+      name: "approval",
+      status: policy.approval.nonInteractive === "allow" ? "warn" : "pass",
+      message:
+        policy.approval.nonInteractive === "allow"
+          ? "non-interactive ask fallback allows calls"
+          : "non-interactive ask fallback denies calls",
+    });
+  }
+
+  if (options.testFile && policy) {
+    try {
+      const source = await readFile(options.testFile, "utf8");
+      const testFile = parsePolicyTestFile(source, options.testFile);
+      const results = runPolicyTestSuite(policy, testFile.cases, false);
+      const failed = results.filter((result) => !result.ok);
+      checks.push({
+        name: "policy-tests",
+        status: failed.length === 0 ? "pass" : "fail",
+        message:
+          failed.length === 0
+            ? `${results.length} policy test${results.length === 1 ? "" : "s"} passed`
+            : `${failed.length} of ${results.length} policy tests failed`,
+      });
+    } catch (error) {
+      checks.push({
+        name: "policy-tests",
+        status: "fail",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  if (options.command.length > 0) {
+    const executable = options.command[0];
+    checks.push({
+      name: "server-command",
+      status: executable && commandExists(executable) ? "pass" : "fail",
+      message: executable
+        ? commandExists(executable)
+          ? `${executable} was found`
+          : `${executable} was not found on PATH`
+        : "no server command provided",
+    });
+  }
+
+  return checks;
+}
+
+function commandExists(command: string): boolean {
+  if (command.includes("/") || command.includes("\\")) {
+    return existsSync(isAbsolute(command) ? command : resolve(command));
+  }
+
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    if (!directory) {
+      continue;
+    }
+
+    if (existsSync(resolve(directory, command))) {
+      return true;
+    }
+
+    if (
+      process.platform === "win32" &&
+      existsSync(resolve(directory, `${command}.cmd`))
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function parsePolicyTestFile(
@@ -604,6 +1251,25 @@ function parsePolicyTestCase(
       reasonContains: expected.reasonContains as string | undefined,
     },
   };
+}
+
+function runPolicyTestSuite(
+  policy: McpGuardPolicy,
+  cases: PolicyTestCase[],
+  failFast: boolean,
+): PolicyTestResult[] {
+  const results: PolicyTestResult[] = [];
+
+  for (const testCase of cases) {
+    const result = evaluatePolicyTestCase(policy, testCase);
+    results.push(result);
+
+    if (failFast && !result.ok) {
+      break;
+    }
+  }
+
+  return results;
 }
 
 function evaluatePolicyTestCase(
@@ -836,15 +1502,21 @@ A local security gateway for MCP servers and AI coding agents.
 
 Usage:
   mcpguard init [--out mcpguard.yaml] [--force]
-  mcpguard run [--policy mcpguard.yaml] [--audit-log .mcpguard/audit.jsonl] [--non-interactive deny|allow] -- <server command>
+  mcpguard setup <cursor|claude|generic> filesystem [--root .] [--force]
+  mcpguard run [--policy mcpguard.yaml] [--cwd .] [--audit-log .mcpguard/audit.jsonl] [--non-interactive deny|allow] -- <server command>
   mcpguard logs [--audit-log .mcpguard/audit.jsonl] [--limit 20] [--json]
+  mcpguard config generate --client cursor --name filesystem --policy mcpguard.yaml -- npx @modelcontextprotocol/server-filesystem .
+  mcpguard doctor [--policy mcpguard.yaml] [--test mcpguard.tests.yaml] [--json] [-- <server command>]
   mcpguard policy generate [--audit-log .mcpguard/audit.jsonl] [--out mcpguard.generated.yaml]
   mcpguard policy validate [--policy mcpguard.yaml] [--json]
   mcpguard policy simulate [--policy mcpguard.yaml] --tool read_file --args '{"path":"README.md"}' [--json] [--fail-on-deny]
   mcpguard policy test [--file mcpguard.tests.yaml] [--policy mcpguard.yaml] [--json] [--fail-fast]
 
 Examples:
-  mcpguard init
+  mcpguard init --preset filesystem-safe
+  mcpguard setup cursor filesystem --root .
+  mcpguard config generate --client cursor --name filesystem -- npx @modelcontextprotocol/server-filesystem .
+  mcpguard doctor --policy examples/filesystem/mcpguard.yaml --test examples/filesystem/mcpguard.tests.yaml -- node examples/demo-server.mjs
   mcpguard run -- npx @modelcontextprotocol/server-filesystem .
   mcpguard logs
   mcpguard policy simulate --tool read_file --args '{"path":".env"}'
