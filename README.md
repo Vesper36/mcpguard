@@ -63,6 +63,7 @@ Validate and simulate policy decisions without starting an MCP server:
 ```bash
 mcpguard policy validate
 mcpguard policy simulate --tool read_file --args '{"path":".env"}'
+mcpguard policy test --file examples/filesystem/mcpguard.tests.yaml
 ```
 
 ## Policy Example
@@ -140,6 +141,7 @@ mcpguard logs [--audit-log .mcpguard/audit.jsonl] [--limit 20] [--json]
 mcpguard policy generate [--audit-log .mcpguard/audit.jsonl] [--out mcpguard.generated.yaml]
 mcpguard policy validate [--policy mcpguard.yaml] [--json]
 mcpguard policy simulate [--policy mcpguard.yaml] --tool read_file --args '{"path":"README.md"}' [--json] [--fail-on-deny]
+mcpguard policy test [--file mcpguard.tests.yaml] [--policy mcpguard.yaml] [--json] [--fail-fast]
 ```
 
 ## How It Works

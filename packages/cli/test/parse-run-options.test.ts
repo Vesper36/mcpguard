@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseRunOptions, parseSimulateOptions } from "../src/index.js";
+import {
+  parsePolicyTestOptions,
+  parseRunOptions,
+  parseSimulateOptions,
+} from "../src/index.js";
 
 describe("parseRunOptions", () => {
   it("parses policy and command after separator", () => {
@@ -47,5 +51,25 @@ describe("parseSimulateOptions", () => {
     expect(() =>
       parseSimulateOptions(["--tool", "read_file", "--args", '"README.md"']),
     ).toThrow("--args must be a JSON object");
+  });
+});
+
+describe("parsePolicyTestOptions", () => {
+  it("parses policy test options", () => {
+    expect(
+      parsePolicyTestOptions([
+        "--file",
+        "examples/filesystem/mcpguard.tests.yaml",
+        "--policy",
+        "examples/filesystem/mcpguard.yaml",
+        "--json",
+        "--fail-fast",
+      ]),
+    ).toEqual({
+      file: "examples/filesystem/mcpguard.tests.yaml",
+      policyPath: "examples/filesystem/mcpguard.yaml",
+      json: true,
+      failFast: true,
+    });
   });
 });

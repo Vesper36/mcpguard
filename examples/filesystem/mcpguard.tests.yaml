@@ -1,0 +1,28 @@
+version: 1
+policy: mcpguard.yaml
+
+cases:
+  - name: allow README read
+    tool: read_file
+    args:
+      path: README.md
+    expect:
+      action: allow
+      ruleId: allow-docs-and-source
+
+  - name: block dotenv read
+    tool: read_file
+    args:
+      path: .env
+    expect:
+      action: deny
+      ruleId: block-secrets
+
+  - name: ask before unknown write
+    tool: write_file
+    args:
+      path: src/index.ts
+      content: hello
+    expect:
+      action: ask
+      ruleId: null

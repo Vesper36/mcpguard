@@ -106,3 +106,41 @@ mcpguard policy simulate --tool read_file --args '{"path":"README.md"}' --json
 ```
 
 Use `--fail-on-deny` in CI when a denied decision should fail the job.
+
+## Policy Tests
+
+For repeatable checks, keep expected decisions in a YAML test file:
+
+```yaml
+version: 1
+policy: mcpguard.yaml
+
+cases:
+  - name: block dotenv read
+    tool: read_file
+    args:
+      path: .env
+    expect:
+      action: deny
+      ruleId: block-secrets
+```
+
+Run the suite:
+
+```bash
+mcpguard policy test --file mcpguard.tests.yaml
+```
+
+`policy` inside the test file is resolved relative to the test file. `--policy` overrides it.
+
+Supported expectations:
+
+- `action`: `allow`, `deny`, or `ask`.
+- `ruleId`: expected matched rule, or `null` for the default decision.
+- `reasonContains`: substring that must appear in the decision reason.
+
+CI-friendly output:
+
+```bash
+mcpguard policy test --file mcpguard.tests.yaml --json
+```

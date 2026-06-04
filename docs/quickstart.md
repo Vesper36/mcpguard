@@ -28,6 +28,7 @@ pnpm --filter mcpguard dev -- logs
 pnpm --filter mcpguard dev -- logs --json
 pnpm --filter mcpguard dev -- policy validate
 pnpm --filter mcpguard dev -- policy simulate --tool read_file --args '{"path":".env"}'
+pnpm --filter mcpguard dev -- policy test --file examples/filesystem/mcpguard.tests.yaml
 pnpm --filter mcpguard dev -- policy generate --out mcpguard.generated.yaml
 ```
 

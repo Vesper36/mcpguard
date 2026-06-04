@@ -14,10 +14,12 @@ import {
   type JsonObject,
   type JsonValue,
   type McpGuardPolicy,
+  type PolicyAction,
 } from "@mcpguard/core";
-import { stringify as stringifyYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 const DEFAULT_POLICY_PATH = "mcpguard.yaml";
+const DEFAULT_POLICY_TEST_PATH = "mcpguard.tests.yaml";
 
 interface RunOptions {
   policyPath: string;
@@ -45,6 +47,45 @@ interface SimulateOptions {
   args: JsonObject;
   json: boolean;
   failOnDeny: boolean;
+}
+
+interface PolicyTestOptions {
+  file: string;
+  policyPath?: string;
+  json: boolean;
+  failFast: boolean;
+}
+
+interface PolicyTestFile {
+  version?: number;
+  policy?: string;
+  cases: PolicyTestCase[];
+}
+
+interface PolicyTestCase {
+  name: string;
+  method: string;
+  tool: string;
+  args: JsonObject;
+  expect: {
+    action?: PolicyAction;
+    ruleId?: string | null;
+    reasonContains?: string;
+  };
+}
+
+interface PolicyTestResult {
+  name: string;
+  ok: boolean;
+  method: string;
+  tool: string;
+  actual: {
+    action: PolicyAction;
+    ruleId?: string;
+    reason: string;
+  };
+  expected: PolicyTestCase["expect"];
+  message?: string;
 }
 
 async function main(argv = process.argv.slice(2)): Promise<number> {
@@ -160,9 +201,11 @@ async function policyCommand(args: string[]): Promise<number> {
       return await policyValidateCommand(rest);
     case "simulate":
       return await policySimulateCommand(rest);
+    case "test":
+      return await policyTestCommand(rest);
     default:
       throw new CliError(
-        "Use: mcpguard policy <generate|validate|simulate>",
+        "Use: mcpguard policy <generate|validate|simulate|test>",
         1,
       );
   }
@@ -260,6 +303,61 @@ async function policySimulateCommand(args: string[]): Promise<number> {
   return 0;
 }
 
+async function policyTestCommand(args: string[]): Promise<number> {
+  const options = parsePolicyTestOptions(args);
+  const source = await readFile(options.file, "utf8");
+  const testFile = parsePolicyTestFile(source, options.file);
+  const policyPath = options.policyPath
+    ? options.policyPath
+    : resolvePathFromBaseFile(
+        options.file,
+        testFile.policy ?? DEFAULT_POLICY_PATH,
+      );
+  const policy = await loadPolicy(policyPath);
+  const results: PolicyTestResult[] = [];
+
+  for (const testCase of testFile.cases) {
+    const result = evaluatePolicyTestCase(policy, testCase);
+    results.push(result);
+
+    if (options.failFast && !result.ok) {
+      break;
+    }
+  }
+
+  const passed = results.filter((result) => result.ok).length;
+  const failed = results.length - passed;
+
+  if (options.json) {
+    console.log(
+      JSON.stringify({
+        ok: failed === 0,
+        file: options.file,
+        policy: policyPath,
+        passed,
+        failed,
+        results,
+      }),
+    );
+  } else {
+    for (const result of results) {
+      const state = result.ok ? "PASS" : "FAIL";
+      console.log(
+        `${state} ${result.name} actual=${result.actual.action} rule=${result.actual.ruleId ?? "default"}`,
+      );
+      if (!result.ok && result.message) {
+        console.log(`  ${result.message}`);
+      }
+    }
+
+    console.log(
+      `Policy tests: ${passed} passed, ${failed} failed (${options.file})`,
+    );
+  }
+
+  return failed === 0 ? 0 : 1;
+}
+
 export function parseSimulateOptions(args: string[]): SimulateOptions {
   const policyPath = readStringOption(
     args,
@@ -300,6 +398,15 @@ export function parseSimulateOptions(args: string[]): SimulateOptions {
     args: parsedArgs as JsonObject,
     json: args.includes("--json"),
     failOnDeny: args.includes("--fail-on-deny"),
+  };
+}
+
+export function parsePolicyTestOptions(args: string[]): PolicyTestOptions {
+  return {
+    file: readStringOption(args, ["--file", "-f"], DEFAULT_POLICY_TEST_PATH),
+    policyPath: readOptionalStringOption(args, ["--policy", "-p"]),
+    json: args.includes("--json"),
+    failFast: args.includes("--fail-fast"),
   };
 }
 
@@ -370,6 +477,196 @@ async function loadPolicy(
       ? DEFAULT_POLICY_TEXT
       : await readFile(policyPath, "utf8");
   return parsePolicy(source, policyPath);
+}
+
+function parsePolicyTestFile(
+  source: string,
+  sourceName: string,
+): PolicyTestFile {
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(source);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new CliError(
+      `Invalid policy test YAML at ${sourceName}: ${message}`,
+      1,
+    );
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new CliError(
+      `Invalid policy test file at ${sourceName}: expected an object`,
+      1,
+    );
+  }
+
+  const object = parsed as Record<string, unknown>;
+  const version = object.version;
+  if (version !== undefined && version !== 1) {
+    throw new CliError(
+      `Invalid policy test file at ${sourceName}: version must be 1`,
+      1,
+    );
+  }
+
+  if (object.policy !== undefined && typeof object.policy !== "string") {
+    throw new CliError(
+      `Invalid policy test file at ${sourceName}: policy must be a string`,
+      1,
+    );
+  }
+
+  if (!Array.isArray(object.cases)) {
+    throw new CliError(
+      `Invalid policy test file at ${sourceName}: cases must be an array`,
+      1,
+    );
+  }
+
+  return {
+    version: version as number | undefined,
+    policy: object.policy,
+    cases: object.cases.map((entry, index) =>
+      parsePolicyTestCase(entry, index, sourceName),
+    ),
+  };
+}
+
+function parsePolicyTestCase(
+  value: unknown,
+  index: number,
+  sourceName: string,
+): PolicyTestCase {
+  const prefix = `Invalid policy test case ${index + 1} at ${sourceName}`;
+
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new CliError(`${prefix}: expected an object`, 1);
+  }
+
+  const object = value as Record<string, unknown>;
+  const name =
+    typeof object.name === "string" ? object.name : `case ${index + 1}`;
+  const method =
+    typeof object.method === "string" ? object.method : "tools/call";
+  const tool = object.tool;
+  const args = object.args ?? {};
+  const expect = object.expect;
+
+  if (typeof tool !== "string" || tool.length === 0) {
+    throw new CliError(`${prefix}: tool is required`, 1);
+  }
+
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    throw new CliError(`${prefix}: args must be a JSON object`, 1);
+  }
+
+  if (!expect || typeof expect !== "object" || Array.isArray(expect)) {
+    throw new CliError(`${prefix}: expect must be an object`, 1);
+  }
+
+  const expected = expect as Record<string, unknown>;
+  if (
+    expected.action !== undefined &&
+    expected.action !== "allow" &&
+    expected.action !== "deny" &&
+    expected.action !== "ask"
+  ) {
+    throw new CliError(
+      `${prefix}: expect.action must be allow, deny, or ask`,
+      1,
+    );
+  }
+
+  if (
+    expected.ruleId !== undefined &&
+    expected.ruleId !== null &&
+    typeof expected.ruleId !== "string"
+  ) {
+    throw new CliError(`${prefix}: expect.ruleId must be a string or null`, 1);
+  }
+
+  if (
+    expected.reasonContains !== undefined &&
+    typeof expected.reasonContains !== "string"
+  ) {
+    throw new CliError(`${prefix}: expect.reasonContains must be a string`, 1);
+  }
+
+  return {
+    name,
+    method,
+    tool,
+    args: args as JsonObject,
+    expect: {
+      action: expected.action as PolicyAction | undefined,
+      ruleId: expected.ruleId as string | null | undefined,
+      reasonContains: expected.reasonContains as string | undefined,
+    },
+  };
+}
+
+function evaluatePolicyTestCase(
+  policy: McpGuardPolicy,
+  testCase: PolicyTestCase,
+): PolicyTestResult {
+  const context = requestContextFromMessage({
+    jsonrpc: "2.0",
+    id: "test",
+    method: testCase.method,
+    params: {
+      name: testCase.tool,
+      arguments: testCase.args,
+    },
+  });
+  const decision = evaluatePolicy(policy, context);
+  const failures: string[] = [];
+
+  if (testCase.expect.action && decision.action !== testCase.expect.action) {
+    failures.push(
+      `expected action ${testCase.expect.action}, got ${decision.action}`,
+    );
+  }
+
+  if (testCase.expect.ruleId !== undefined) {
+    const actualRuleId = decision.ruleId ?? null;
+    if (actualRuleId !== testCase.expect.ruleId) {
+      failures.push(
+        `expected rule ${testCase.expect.ruleId ?? "default"}, got ${actualRuleId ?? "default"}`,
+      );
+    }
+  }
+
+  if (
+    testCase.expect.reasonContains &&
+    !decision.reason.includes(testCase.expect.reasonContains)
+  ) {
+    failures.push(
+      `expected reason to contain ${JSON.stringify(testCase.expect.reasonContains)}, got ${JSON.stringify(decision.reason)}`,
+    );
+  }
+
+  return {
+    name: testCase.name,
+    ok: failures.length === 0,
+    method: testCase.method,
+    tool: testCase.tool,
+    actual: {
+      action: decision.action,
+      ruleId: decision.ruleId,
+      reason: decision.reason,
+    },
+    expected: testCase.expect,
+    message: failures.join("; ") || undefined,
+  };
+}
+
+function resolvePathFromBaseFile(baseFile: string, candidate: string): string {
+  if (candidate.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(candidate)) {
+    return candidate;
+  }
+
+  return resolve(dirname(resolve(baseFile)), candidate);
 }
 
 async function readAuditEvents(path: string): Promise<AuditEvent[]> {
@@ -544,12 +841,14 @@ Usage:
   mcpguard policy generate [--audit-log .mcpguard/audit.jsonl] [--out mcpguard.generated.yaml]
   mcpguard policy validate [--policy mcpguard.yaml] [--json]
   mcpguard policy simulate [--policy mcpguard.yaml] --tool read_file --args '{"path":"README.md"}' [--json] [--fail-on-deny]
+  mcpguard policy test [--file mcpguard.tests.yaml] [--policy mcpguard.yaml] [--json] [--fail-fast]
 
 Examples:
   mcpguard init
   mcpguard run -- npx @modelcontextprotocol/server-filesystem .
   mcpguard logs
   mcpguard policy simulate --tool read_file --args '{"path":".env"}'
+  mcpguard policy test --file examples/filesystem/mcpguard.tests.yaml
 `);
 }
 
