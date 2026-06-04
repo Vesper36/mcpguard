@@ -81,3 +81,28 @@ audit:
 ```
 
 Audit logs are JSONL. Sensitive values are redacted before logging.
+
+## Validation
+
+Validate policy syntax and schema:
+
+```bash
+mcpguard policy validate --policy mcpguard.yaml
+```
+
+Simulate a tool call without starting an MCP server:
+
+```bash
+mcpguard policy simulate \
+  --policy mcpguard.yaml \
+  --tool read_file \
+  --args '{"path":".env"}'
+```
+
+Machine-readable output:
+
+```bash
+mcpguard policy simulate --tool read_file --args '{"path":"README.md"}' --json
+```
+
+Use `--fail-on-deny` in CI when a denied decision should fail the job.

@@ -58,6 +58,13 @@ Generate a policy draft from allowed calls:
 mcpguard policy generate --out mcpguard.generated.yaml
 ```
 
+Validate and simulate policy decisions without starting an MCP server:
+
+```bash
+mcpguard policy validate
+mcpguard policy simulate --tool read_file --args '{"path":".env"}'
+```
+
 ## Policy Example
 
 ```yaml
@@ -131,6 +138,8 @@ mcpguard init [--out mcpguard.yaml] [--force]
 mcpguard run [--policy mcpguard.yaml] [--audit-log .mcpguard/audit.jsonl] [--non-interactive deny|allow] -- <server command>
 mcpguard logs [--audit-log .mcpguard/audit.jsonl] [--limit 20] [--json]
 mcpguard policy generate [--audit-log .mcpguard/audit.jsonl] [--out mcpguard.generated.yaml]
+mcpguard policy validate [--policy mcpguard.yaml] [--json]
+mcpguard policy simulate [--policy mcpguard.yaml] --tool read_file --args '{"path":"README.md"}' [--json] [--fail-on-deny]
 ```
 
 ## How It Works

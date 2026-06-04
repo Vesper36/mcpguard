@@ -5,11 +5,14 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_POLICY_TEXT,
+  evaluatePolicy,
   parsePolicy,
   Redactor,
+  requestContextFromMessage,
   runStdioProxy,
   type AuditEvent,
   type JsonObject,
+  type JsonValue,
   type McpGuardPolicy,
 } from "@mcpguard/core";
 import { stringify as stringifyYaml } from "yaml";
@@ -33,6 +36,15 @@ interface LogsOptions {
 interface GenerateOptions {
   auditLog: string;
   out?: string;
+}
+
+interface SimulateOptions {
+  policyPath: string;
+  method: string;
+  tool: string;
+  args: JsonObject;
+  json: boolean;
+  failOnDeny: boolean;
 }
 
 async function main(argv = process.argv.slice(2)): Promise<number> {
@@ -140,20 +152,30 @@ async function logsCommand(args: string[]): Promise<number> {
 
 async function policyCommand(args: string[]): Promise<number> {
   const [subcommand, ...rest] = args;
-  if (subcommand !== "generate") {
-    throw new CliError(
-      "Use: mcpguard policy generate [--audit-log path] [--out path]",
-      1,
-    );
-  }
 
+  switch (subcommand) {
+    case "generate":
+      return await policyGenerateCommand(rest);
+    case "validate":
+      return await policyValidateCommand(rest);
+    case "simulate":
+      return await policySimulateCommand(rest);
+    default:
+      throw new CliError(
+        "Use: mcpguard policy <generate|validate|simulate>",
+        1,
+      );
+  }
+}
+
+async function policyGenerateCommand(args: string[]): Promise<number> {
   const options: GenerateOptions = {
     auditLog: readStringOption(
-      rest,
+      args,
       ["--audit-log", "--log"],
       ".mcpguard/audit.jsonl",
     ),
-    out: readOptionalStringOption(rest, ["--out", "-o"]),
+    out: readOptionalStringOption(args, ["--out", "-o"]),
   };
 
   const events = await readAuditEvents(options.auditLog);
@@ -168,6 +190,117 @@ async function policyCommand(args: string[]): Promise<number> {
   }
 
   return 0;
+}
+
+async function policyValidateCommand(args: string[]): Promise<number> {
+  const policyPath = readStringOption(
+    args,
+    ["--policy", "-p"],
+    DEFAULT_POLICY_PATH,
+  );
+  const json = args.includes("--json");
+  const policy = await loadPolicy(policyPath);
+
+  if (json) {
+    console.log(
+      JSON.stringify({
+        ok: true,
+        policy: policyPath,
+        rules: policy.rules.length,
+        defaults: policy.defaults,
+      }),
+    );
+  } else {
+    console.log(
+      `Policy OK: ${policyPath} (${policy.rules.length} rule${policy.rules.length === 1 ? "" : "s"})`,
+    );
+  }
+
+  return 0;
+}
+
+async function policySimulateCommand(args: string[]): Promise<number> {
+  const options = parseSimulateOptions(args);
+  const policy = await loadPolicy(options.policyPath);
+  const context = requestContextFromMessage({
+    jsonrpc: "2.0",
+    id: "simulate",
+    method: options.method,
+    params: {
+      name: options.tool,
+      arguments: options.args,
+    },
+  });
+  const decision = evaluatePolicy(policy, context);
+  const redactor = new Redactor({
+    enabled: policy.redaction.enabled,
+    mask: policy.redaction.mask,
+    extraPatterns: policy.redaction.extraPatterns,
+  });
+  const result = {
+    method: options.method,
+    tool: options.tool,
+    args: redactor.redactValue(options.args) as JsonValue,
+    decision,
+  };
+
+  if (options.json) {
+    console.log(JSON.stringify(result));
+  } else {
+    const state = decision.action.toUpperCase();
+    console.log(
+      `${state} ${options.tool} rule=${decision.ruleId ?? "default"} reason=${decision.reason}`,
+    );
+  }
+
+  if (options.failOnDeny && decision.action === "deny") {
+    return 2;
+  }
+
+  return 0;
+}
+
+export function parseSimulateOptions(args: string[]): SimulateOptions {
+  const policyPath = readStringOption(
+    args,
+    ["--policy", "-p"],
+    DEFAULT_POLICY_PATH,
+  );
+  const method = readStringOption(args, ["--method"], "tools/call");
+  const tool = readOptionalStringOption(args, ["--tool"]);
+  const argsJson = readStringOption(args, ["--args"], "{}");
+
+  if (!tool) {
+    throw new CliError(
+      'Missing --tool. Use: mcpguard policy simulate --tool read_file --args \'{"path":"README.md"}\'',
+      1,
+    );
+  }
+
+  let parsedArgs: unknown;
+  try {
+    parsedArgs = JSON.parse(argsJson);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new CliError(`--args must be valid JSON: ${message}`, 1);
+  }
+
+  if (
+    !parsedArgs ||
+    typeof parsedArgs !== "object" ||
+    Array.isArray(parsedArgs)
+  ) {
+    throw new CliError("--args must be a JSON object", 1);
+  }
+
+  return {
+    policyPath,
+    method,
+    tool,
+    args: parsedArgs as JsonObject,
+    json: args.includes("--json"),
+    failOnDeny: args.includes("--fail-on-deny"),
+  };
 }
 
 export function parseRunOptions(args: string[]): RunOptions {
@@ -211,10 +344,7 @@ export function parseRunOptions(args: string[]): RunOptions {
 async function loadAndOverridePolicy(
   options: RunOptions,
 ): Promise<McpGuardPolicy> {
-  const source = existsSync(options.policyPath)
-    ? await readFile(options.policyPath, "utf8")
-    : DEFAULT_POLICY_TEXT;
-  const policy = parsePolicy(source, options.policyPath);
+  const policy = await loadPolicy(options.policyPath, true);
 
   if (options.auditLog) {
     policy.audit.path = options.auditLog;
@@ -229,6 +359,17 @@ async function loadAndOverridePolicy(
   }
 
   return policy;
+}
+
+async function loadPolicy(
+  policyPath: string,
+  useDefaultWhenMissing = false,
+): Promise<McpGuardPolicy> {
+  const source =
+    useDefaultWhenMissing && !existsSync(policyPath)
+      ? DEFAULT_POLICY_TEXT
+      : await readFile(policyPath, "utf8");
+  return parsePolicy(source, policyPath);
 }
 
 async function readAuditEvents(path: string): Promise<AuditEvent[]> {
@@ -401,11 +542,14 @@ Usage:
   mcpguard run [--policy mcpguard.yaml] [--audit-log .mcpguard/audit.jsonl] [--non-interactive deny|allow] -- <server command>
   mcpguard logs [--audit-log .mcpguard/audit.jsonl] [--limit 20] [--json]
   mcpguard policy generate [--audit-log .mcpguard/audit.jsonl] [--out mcpguard.generated.yaml]
+  mcpguard policy validate [--policy mcpguard.yaml] [--json]
+  mcpguard policy simulate [--policy mcpguard.yaml] --tool read_file --args '{"path":"README.md"}' [--json] [--fail-on-deny]
 
 Examples:
   mcpguard init
   mcpguard run -- npx @modelcontextprotocol/server-filesystem .
   mcpguard logs
+  mcpguard policy simulate --tool read_file --args '{"path":".env"}'
 `);
 }
 
