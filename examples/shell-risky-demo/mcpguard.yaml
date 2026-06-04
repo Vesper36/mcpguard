@@ -1,0 +1,18 @@
+version: 1
+
+defaults:
+  action: ask
+
+rules:
+  - id: deny-destructive-shell
+    match:
+      method: tools/call
+      args:
+        command:
+          denyRegex:
+            - "(^|\\s)rm\\s+-rf(\\s|$)"
+            - "git\\s+reset\\s+--hard"
+            - "DROP\\s+DATABASE"
+            - "curl\\s+[^|]+\\|\\s*(sh|bash)"
+    action: deny
+    reason: Command matches a destructive shell pattern.

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+coverage/
+.mcpguard/
+*.log
+.DS_Store
+pnpm-debug.log*

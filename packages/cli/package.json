@@ -1,0 +1,44 @@
+{
+  "name": "mcpguard",
+  "version": "0.1.0",
+  "description": "Local security gateway for MCP servers and AI coding agents.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "mcpguard": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --sourcemap --clean",
+    "clean": "rm -rf dist coverage",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mcpguard/core": "workspace:*",
+    "yaml": "^2.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.14"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mcp",
+    "ai-agents",
+    "security",
+    "cli",
+    "proxy",
+    "redaction"
+  ]
+}
