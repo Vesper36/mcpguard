@@ -133,6 +133,7 @@ interface SetupOptions {
   policyPath: string;
   testsPath: string;
   configPath: string;
+  install: boolean;
   force: boolean;
   command: string[];
 }
@@ -221,6 +222,12 @@ async function setupCommand(args: string[]): Promise<number> {
   console.log(`Created ${options.policyPath}`);
   console.log(`Created ${options.testsPath}`);
   console.log(`Created ${options.configPath}`);
+
+  if (options.install) {
+    const installedPath = await installClientConfig(options, config);
+    console.log(`Updated ${installedPath}`);
+  }
+
   console.log("");
   console.log("Paste this mcpServers block into your MCP client:");
   console.log(configText.trimEnd());
@@ -674,6 +681,7 @@ export function parseSetupOptions(args: string[]): SetupOptions {
     policyPath,
     testsPath,
     configPath,
+    install: optionArgs.includes("--install"),
     force: optionArgs.includes("--force") || optionArgs.includes("-f"),
     command:
       commandOverride.length > 0
@@ -782,6 +790,36 @@ async function writeSetupFile(
 
   await mkdir(dirname(resolve(path)), { recursive: true });
   await writeFile(path, content, "utf8");
+}
+
+async function installClientConfig(
+  options: SetupOptions,
+  config: JsonObject,
+): Promise<string> {
+  if (options.client !== "cursor") {
+    throw new CliError(
+      "--install currently supports Cursor project config only. Use the generated JSON for this client.",
+      1,
+    );
+  }
+
+  const installPath = resolve(options.root, ".cursor/mcp.json");
+  const existing = existsSync(installPath)
+    ? parseJsonObject(await readFile(installPath, "utf8"), installPath)
+    : {};
+  const existingServers = asJsonObject(existing.mcpServers) ?? {};
+  const generatedServers = asJsonObject(config.mcpServers) ?? {};
+  const merged: JsonObject = {
+    ...existing,
+    mcpServers: {
+      ...existingServers,
+      ...generatedServers,
+    },
+  };
+
+  await mkdir(dirname(installPath), { recursive: true });
+  await writeFile(installPath, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+  return installPath;
 }
 
 function policyPresetText(preset: PolicyPreset): string {
@@ -1006,6 +1044,31 @@ function normalizeSetupClient(
 
   if (value === "claude-desktop" || value === "cursor" || value === "generic") {
     return value;
+  }
+
+  return undefined;
+}
+
+function parseJsonObject(source: string, sourceName: string): JsonObject {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new CliError(`Invalid JSON at ${sourceName}: ${message}`, 1);
+  }
+
+  const object = asJsonObject(parsed);
+  if (!object) {
+    throw new CliError(`Invalid JSON at ${sourceName}: expected an object`, 1);
+  }
+
+  return object;
+}
+
+function asJsonObject(value: unknown): JsonObject | undefined {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as JsonObject;
   }
 
   return undefined;
@@ -1502,7 +1565,7 @@ A local security gateway for MCP servers and AI coding agents.
 
 Usage:
   mcpguard init [--out mcpguard.yaml] [--force]
-  mcpguard setup <cursor|claude|generic> filesystem [--root .] [--force]
+  mcpguard setup <cursor|claude|generic> filesystem [--root .] [--install] [--force]
   mcpguard run [--policy mcpguard.yaml] [--cwd .] [--audit-log .mcpguard/audit.jsonl] [--non-interactive deny|allow] -- <server command>
   mcpguard logs [--audit-log .mcpguard/audit.jsonl] [--limit 20] [--json]
   mcpguard config generate --client cursor --name filesystem --policy mcpguard.yaml -- npx @modelcontextprotocol/server-filesystem .
@@ -1514,7 +1577,7 @@ Usage:
 
 Examples:
   mcpguard init --preset filesystem-safe
-  mcpguard setup cursor filesystem --root .
+  mcpguard setup cursor filesystem --root . --install
   mcpguard config generate --client cursor --name filesystem -- npx @modelcontextprotocol/server-filesystem .
   mcpguard doctor --policy examples/filesystem/mcpguard.yaml --test examples/filesystem/mcpguard.tests.yaml -- node examples/demo-server.mjs
   mcpguard run -- npx @modelcontextprotocol/server-filesystem .

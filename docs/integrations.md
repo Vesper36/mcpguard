@@ -22,6 +22,12 @@ The fastest path is `setup`, which creates a policy, a policy test file, and a p
 mcpguard setup cursor filesystem --root .
 ```
 
+For Cursor, add `--install` to merge the generated server into `.cursor/mcp.json`:
+
+```bash
+mcpguard setup cursor filesystem --root . --install
+```
+
 For an existing policy, generate a config block without writing setup files:
 
 ```bash

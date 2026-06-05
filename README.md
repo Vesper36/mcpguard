@@ -48,6 +48,12 @@ Or generate a complete Cursor/Claude-ready setup for the current repository:
 mcpguard setup cursor filesystem --root .
 ```
 
+For Cursor, install the project config directly:
+
+```bash
+mcpguard setup cursor filesystem --root . --install
+```
+
 Run an MCP server behind MCPGuard:
 
 ```bash
@@ -151,7 +157,7 @@ Rules are evaluated top to bottom. The first matching rule wins. If no rule matc
 ```bash
 mcpguard init [--out mcpguard.yaml] [--force]
 mcpguard init [--preset filesystem-safe|shell-safe|github-readonly]
-mcpguard setup <cursor|claude|generic> filesystem [--root .] [--force]
+mcpguard setup <cursor|claude|generic> filesystem [--root .] [--install] [--force]
 mcpguard run [--policy mcpguard.yaml] [--cwd .] [--audit-log .mcpguard/audit.jsonl] [--non-interactive deny|allow] -- <server command>
 mcpguard logs [--audit-log .mcpguard/audit.jsonl] [--limit 20] [--json]
 mcpguard config generate --client cursor --name filesystem --policy mcpguard.yaml -- npx @modelcontextprotocol/server-filesystem .

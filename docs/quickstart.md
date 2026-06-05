@@ -19,6 +19,12 @@ Generate policy, policy tests, and a ready-to-paste MCP client config for the cu
 pnpm --filter mcpguard dev -- setup cursor filesystem --root .
 ```
 
+For Cursor projects, write `.cursor/mcp.json` directly:
+
+```bash
+pnpm --filter mcpguard dev -- setup cursor filesystem --root . --install
+```
+
 Proxy an MCP server:
 
 ```bash
@@ -43,6 +49,6 @@ For a global install after publishing:
 
 ```bash
 pnpm add -g mcpguard
-mcpguard setup cursor filesystem --root .
+mcpguard setup cursor filesystem --root . --install
 mcpguard run -- npx @modelcontextprotocol/server-filesystem .
 ```

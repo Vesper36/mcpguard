@@ -63,6 +63,7 @@ describe("parseSetupOptions", () => {
       client: "cursor",
       target: "filesystem",
       name: "repo",
+      install: false,
       force: false,
       command: ["npx", "@modelcontextprotocol/server-filesystem", "."],
     });
@@ -77,6 +78,17 @@ describe("parseSetupOptions", () => {
     expect(parseSetupOptions(["claude", "filesystem"]).client).toBe(
       "claude-desktop",
     );
+  });
+
+  it("parses install mode for cursor project config", () => {
+    expect(
+      parseSetupOptions(["cursor", "filesystem", "--install", "--force"]),
+    ).toMatchObject({
+      client: "cursor",
+      target: "filesystem",
+      install: true,
+      force: true,
+    });
   });
 });
 
