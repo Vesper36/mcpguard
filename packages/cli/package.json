@@ -4,8 +4,17 @@
   "description": "Local security gateway for MCP servers and AI coding agents.",
   "license": "MIT",
   "type": "module",
+  "homepage": "https://github.com/Vesper36/mcpguard#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Vesper36/mcpguard.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/Vesper36/mcpguard/issues"
+  },
   "bin": {
-    "mcpguard": "./dist/index.js"
+    "mcpguard": "dist/index.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -21,7 +30,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@mcpguard/core": "workspace:*",
     "yaml": "^2.8.2"
   },
   "devDependencies": {
